@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 import html
 import re
 
@@ -11,13 +12,18 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup
 
 try:
+    from .config import load_admin_user_ids, load_config, save_config
     from .documents.render import render_act, render_contract, render_supplement
+    from .reporting import send_doc_start_report, send_file_report, send_start_report
     from .states import ContractStates, SupplementStates
 except ImportError:  # pragma: no cover - allow running as script
+    from config import load_admin_user_ids, load_config, save_config
     from documents.render import render_act, render_contract, render_supplement
+    from reporting import send_doc_start_report, send_file_report, send_start_report
     from states import ContractStates, SupplementStates
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 MAIN_MENU_CONTRACT = "📝 Договор"
 MAIN_MENU_ACT = "📄 Акт"
@@ -54,6 +60,12 @@ EDIT_SECOND_PAY = "Платеж 2"
 EDIT_CONTRACT_NUMBER = "Номер договора"
 EDIT_SUPPLEMENT_DATE = "Дата доп. соглашения"
 EDIT_SUPPLEMENT_TEXT = "Текст доп. соглашения"
+
+DOC_TYPE_LABELS = {
+    "contract": "Договор",
+    "act": "Акт",
+    "supplement": "Доп. соглашение",
+}
 
 
 def build_keyboard(
@@ -226,6 +238,59 @@ def state_from_value(state_value: str):
     return mapping.get(state_value)
 
 
+def build_file_caption(data: dict, user) -> str:
+    doc_type = data.get("doc_type", "contract")
+    doc_label = DOC_TYPE_LABELS.get(doc_type, "Документ")
+    address = data.get("address") or "нет данных"
+    phone = data.get("phone") or "нет данных"
+
+    client_name = data.get("client_name")
+    if not client_name:
+        client_name = "нет данных"
+
+    username = f"@{user.username}" if getattr(user, "username", None) else "нет username"
+
+    return (
+        f"📄 {doc_label}\n"
+        f"Адрес: {address}\n"
+        f"Телефон: {phone}\n"
+        f"Клиент: {client_name}\n"
+        f"Сделал {doc_label.lower()}: {username}\n"
+        f"UserID: {user.id}"
+    )
+
+
+async def is_authorized_admin(message: Message) -> bool:
+    user = message.from_user
+    if user is None:
+        return False
+
+    allowed_ids = load_admin_user_ids()
+    if allowed_ids and user.id in allowed_ids:
+        return True
+
+    try:
+        member = await message.bot.get_chat_member(message.chat.id, user.id)
+    except Exception:  # noqa: BLE001 - external API
+        logger.exception("Failed to fetch chat member for admin check.")
+        return False
+
+    return member.status in {"administrator", "creator"}
+
+
+async def ensure_topic_command(message: Message) -> bool:
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("Команда доступна только в группе/супергруппе.")
+        return False
+    if not message.message_thread_id:
+        await message.answer("Команду нужно отправить внутри темы (форум).")
+        return False
+    if not await is_authorized_admin(message):
+        await message.answer("Недостаточно прав для настройки.")
+        return False
+    return True
+
+
 async def prompt_for_state(message: Message, state_value: str, data: dict) -> None:
     if state_value == ContractStates.waiting_for_client_name.state:
         await message.answer("Введите ФИО заказчика:", reply_markup=input_keyboard(include_back=False))
@@ -362,6 +427,42 @@ async def finalize_edit(message: Message, state: FSMContext) -> None:
 async def handle_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Привет! Выберите документ:", reply_markup=main_keyboard)
+    if message.chat.type == "private" and message.from_user:
+        await send_start_report(message.bot, message.from_user)
+
+
+@router.message(Command("set_topic_starts"))
+async def handle_set_topic_starts(message: Message) -> None:
+    if not await ensure_topic_command(message):
+        return
+
+    config = load_config()
+    config["report_chat_id"] = message.chat.id
+    config["starts_thread_id"] = message.message_thread_id
+    save_config(config)
+
+    await message.bot.send_message(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="✅ Подтверждено. Эта тема назначена для отчётов о запусках.",
+    )
+
+
+@router.message(Command("set_topic_files"))
+async def handle_set_topic_files(message: Message) -> None:
+    if not await ensure_topic_command(message):
+        return
+
+    config = load_config()
+    config["report_chat_id"] = message.chat.id
+    config["files_thread_id"] = message.message_thread_id
+    save_config(config)
+
+    await message.bot.send_message(
+        chat_id=message.chat.id,
+        message_thread_id=message.message_thread_id,
+        text="✅ Подтверждено. Эта тема назначена для архива файлов.",
+    )
 
 
 @router.message(Command("cancel"))
@@ -387,6 +488,8 @@ async def start_contract_flow(message: Message, state: FSMContext) -> None:
     await state.update_data(doc_type="contract")
     await message.answer("Введите ФИО заказчика:", reply_markup=input_keyboard(include_back=False))
     await state.set_state(ContractStates.waiting_for_client_name)
+    if message.from_user:
+        await send_doc_start_report(message.bot, message.from_user, DOC_TYPE_LABELS["contract"])
 
 
 @router.message(F.text == MAIN_MENU_ACT)
@@ -395,6 +498,8 @@ async def start_act_flow(message: Message, state: FSMContext) -> None:
     await state.update_data(doc_type="act")
     await message.answer("Введите ФИО заказчика:", reply_markup=input_keyboard(include_back=False))
     await state.set_state(ContractStates.waiting_for_client_name)
+    if message.from_user:
+        await send_doc_start_report(message.bot, message.from_user, DOC_TYPE_LABELS["act"])
 
 
 @router.message(F.text == MAIN_MENU_SUPPLEMENT)
@@ -403,6 +508,8 @@ async def start_supplement_flow(message: Message, state: FSMContext) -> None:
     await state.update_data(doc_type="supplement", supplement_text="")
     await message.answer("Введите номер договора:", reply_markup=input_keyboard(include_back=False))
     await state.set_state(SupplementStates.waiting_for_contract_number)
+    if message.from_user:
+        await send_doc_start_report(message.bot, message.from_user, DOC_TYPE_LABELS["supplement"])
 
 
 @router.message(ContractStates.waiting_for_client_name)
@@ -960,6 +1067,9 @@ async def process_contract_confirm(message: Message, state: FSMContext) -> None:
     try:
         if result.pdf_path:
             await message.answer_document(FSInputFile(str(result.pdf_path)), caption=caption, reply_markup=main_keyboard)
+            if message.from_user:
+                report_caption = build_file_caption(data, message.from_user)
+                await send_file_report(message.bot, result.pdf_path, report_caption)
         else:
             await message.answer(
                 f"Не удалось конвертировать в PDF. Отправляю DOCX.\nПричина: {result.error}",
@@ -1083,6 +1193,9 @@ async def process_supplement_confirm(message: Message, state: FSMContext) -> Non
                 caption="Готовое доп. соглашение.",
                 reply_markup=main_keyboard,
             )
+            if message.from_user:
+                report_caption = build_file_caption(data, message.from_user)
+                await send_file_report(message.bot, result.pdf_path, report_caption)
         else:
             await message.answer(
                 f"Не удалось конвертировать в PDF. Отправляю DOCX.\nПричина: {result.error}",
