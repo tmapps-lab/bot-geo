@@ -17,4 +17,5 @@
 ## Документы и шаблоны
 - Шаблоны находятся в `src/documents/templates/`.
 - Для PDF на Windows требуется установленный Microsoft Word (используется `docx2pdf`).
+- На Linux для PDF требуется установленный LibreOffice (`libreoffice` или `soffice` в PATH).
 - При ошибке конвертации бот уведомит и отправит DOCX как fallback.

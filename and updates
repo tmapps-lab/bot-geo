@@ -1,0 +1,252 @@
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/handlers.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/main.py', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/README.md b/README.md[m
+[1mindex 9bdaaf9..6ea5b40 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -8,6 +8,12 @@[m
+ 3) Запустите бота:[m
+    `python -m src.main`[m
+ [m
+[32m+[m[32m## Отчетность в группе (темы)[m
+[32m+[m[32m1) Включите "Темы" (форум) в группе, добавьте бота и дайте ему право писать сообщения.[m
+[32m+[m[32m2) Откройте тему "Запуски" и отправьте команду: `/set_topic_starts`.[m
+[32m+[m[32m3) Откройте тему "Файлы" и отправьте команду: `/set_topic_files`.[m
+[32m+[m[32m4) Проверка: напишите боту `/start` в ЛС и сформируйте документ — лог должен прийти в "Запуски", PDF уйдет в "Файлы".[m
+[32m+[m
+ ## Документы и шаблоны[m
+ - Шаблоны находятся в `src/documents/templates/`.[m
+ - Для PDF на Windows требуется установленный Microsoft Word (используется `docx2pdf`).[m
+[1mdiff --git a/src/handlers.py b/src/handlers.py[m
+[1mindex ecd9245..e41236a 100644[m
+[1m--- a/src/handlers.py[m
+[1m+++ b/src/handlers.py[m
+[36m@@ -2,6 +2,7 @@[m
+ from __future__ import annotations[m
+ [m
+ from datetime import datetime[m
+[32m+[m[32mimport logging[m
+ import html[m
+ import re[m
+ [m
+[36m@@ -11,13 +12,18 @@[m [mfrom aiogram.fsm.context import FSMContext[m
+ from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup[m
+ [m
+ try:[m
+[32m+[m[32m    from .config import load_admin_user_ids, load_config, save_config[m
+     from .documents.render import render_act, render_contract, render_supplement[m
+[32m+[m[32m    from .reporting import send_doc_start_report, send_file_report, send_start_report[m
+     from .states import ContractStates, SupplementStates[m
+ except ImportError:  # pragma: no cover - allow running as script[m
+[32m+[m[32m    from config import load_admin_user_ids, load_config, save_config[m
+     from documents.render import render_act, render_contract, render_supplement[m
+[32m+[m[32m    from reporting import send_doc_start_report, send_file_report, send_start_report[m
+     from states import ContractStates, SupplementStates[m
+ [m
+ router = Router()[m
+[32m+[m[32mlogger = logging.getLogger(__name__)[m
+ [m
+ MAIN_MENU_CONTRACT = "📝 Договор"[m
+ MAIN_MENU_ACT = "📄 Акт"[m
+[36m@@ -55,6 +61,12 @@[m [mEDIT_CONTRACT_NUMBER = "Номер договора"[m
+ EDIT_SUPPLEMENT_DATE = "Дата доп. соглашения"[m
+ EDIT_SUPPLEMENT_TEXT = "Текст доп. соглашения"[m
+ [m
+[32m+[m[32mDOC_TYPE_LABELS = {[m
+[32m+[m[32m    "contract": "Договор",[m
+[32m+[m[32m    "act": "Акт",[m
+[32m+[m[32m    "supplement": "Доп. соглашение",[m
+[32m+[m[32m}[m
+[32m+[m
+ [m
+ def build_keyboard([m
+     rows: list[list[str]],[m
+[36m@@ -226,6 +238,59 @@[m [mdef state_from_value(state_value: str):[m
+     return mapping.get(state_value)[m
+ [m
+ [m
+[32m+[m[32mdef build_file_caption(data: dict, user) -> str:[m
+[32m+[m[32m    doc_type = data.get("doc_type", "contract")[m
+[32m+[m[32m    doc_label = DOC_TYPE_LABELS.get(doc_type, "Документ")[m
+[32m+[m[32m    address = data.get("address") or "нет данных"[m
+[32m+[m[32m    phone = data.get("phone") or "нет данных"[m
+[32m+[m
+[32m+[m[32m    client_name = data.get("client_name")[m
+[32m+[m[32m    if not client_name:[m
+[32m+[m[32m        client_name = "нет данных"[m
+[32m+[m
+[32m+[m[32m    username = f"@{user.username}" if getattr(user, "username", None) else "нет username"[m
+[32m+[m
+[32m+[m[32m    return ([m
+[32m+[m[32m        f"📄 {doc_label}\n"[m
+[32m+[m[32m        f"Адрес: {address}\n"[m
+[32m+[m[32m        f"Телефон: {phone}\n"[m
+[32m+[m[32m        f"Клиент: {client_name}\n"[m
+[32m+[m[32m        f"Сделал {doc_label.lower()}: {username}\n"[m
+[32m+[m[32m        f"UserID: {user.id}"[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def is_authorized_admin(message: Message) -> bool:[m
+[32m+[m[32m    user = message.from_user[m
+[32m+[m[32m    if user is None:[m
+[32m+[m[32m        return False[m
+[32m+[m
+[32m+[m[32m    allowed_ids = load_admin_user_ids()[m
+[32m+[m[32m    if allowed_ids and user.id in allowed_ids:[m
+[32m+[m[32m        return True[m
+[32m+[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        member = await message.bot.get_chat_member(message.chat.id, user.id)[m
+[32m+[m[32m    except Exception:  # noqa: BLE001 - external API[m
+[32m+[m[32m        logger.exception("Failed to fetch chat member for admin check.")[m
+[32m+[m[32m        return False[m
+[32m+[m
+[32m+[m[32m    return member.status in {"administrator", "creator"}[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def ensure_topic_command(message: Message) -> bool:[m
+[32m+[m[32m    if message.chat.type not in {"group", "supergroup"}:[m
+[32m+[m[32m        await message.answer("Команда доступна только в группе/супергруппе.")[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    if not message.message_thread_id:[m
+[32m+[m[32m        await message.answer("Команду нужно отправить внутри темы (форум).")[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    if not await is_authorized_admin(message):[m
+[32m+[m[32m        await message.answer("Недостаточно прав для настройки.")[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    return True[m
+[32m+[m
+[32m+[m
+ async def prompt_for_state(message: Message, state_value: str, data: dict) -> None:[m
+     if state_value == ContractStates.waiting_for_client_name.state:[m
+         await message.answer("Введите ФИО заказчика:", reply_markup=input_keyboard(include_back=False))[m
+[36m@@ -362,6 +427,42 @@[m [masync def finalize_edit(message: Message, state: FSMContext) -> None:[m
+ async def handle_start(message: Message, state: FSMContext) -> None:[m
+     await state.clear()[m
+     await message.answer("Привет! Выберите документ:", reply_markup=main_keyboard)[m
+[32m+[m[32m    if message.chat.type == "private" and message.from_user:[m
+[32m+[m[32m        await send_start_report(message.bot, message.from_user)[m
+[32m+[m
+[32m+[m
+[32m+[m[32m@router.message(Command("set_topic_starts"))[m
+[32m+[m[32masync def handle_set_topic_starts(message: Message) -> None:[m
+[32m+[m[32m    if not await ensure_topic_command(message):[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    config = load_config()[m
+[32m+[m[32m    config["report_chat_id"] = message.chat.id[m
+[32m+[m[32m    config["starts_thread_id"] = message.message_thread_id[m
+[32m+[m[32m    save_config(config)[m
+[32m+[m
+[32m+[m[32m    await message.bot.send_message([m
+[32m+[m[32m        chat_id=message.chat.id,[m
+[32m+[m[32m        message_thread_id=message.message_thread_id,[m
+[32m+[m[32m        text="✅ Подтверждено. Эта тема назначена для отчётов о запусках.",[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+[32m+[m[32m@router.message(Command("set_topic_files"))[m
+[32m+[m[32masync def handle_set_topic_files(message: Message) -> None:[m
+[32m+[m[32m    if not await ensure_topic_command(message):[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    config = load_config()[m
+[32m+[m[32m    config["report_chat_id"] = message.chat.id[m
+[32m+[m[32m    config["files_thread_id"] = message.message_thread_id[m
+[32m+[m[32m    save_config(config)[m
+[32m+[m
+[32m+[m[32m    await message.bot.send_message([m
+[32m+[m[32m        chat_id=message.chat.id,[m
+[32m+[m[32m        message_thread_id=message.message_thread_id,[m
+[32m+[m[32m        text="✅ Подтверждено. Эта тема назначена для архива файлов.",[m
+[32m+[m[32m    )[m
+ [m
+ [m
+ @router.message(Command("cancel"))[m
+[36m@@ -387,6 +488,8 @@[m [masync def start_contract_flow(message: Message, state: FSMContext) -> None:[m
+     await state.update_data(doc_type="contract")[m
+     await message.answer("Введите ФИО заказчика:", reply_markup=input_keyboard(include_back=False))[m
+     await state.set_state(ContractStates.waiting_for_client_name)[m
+[32m+[m[32m    if message.from_user:[m
+[32m+[m[32m        await send_doc_start_report(message.bot, message.from_user, DOC_TYPE_LABELS["contract"])[m
+ [m
+ [m
+ @router.message(F.text == MAIN_MENU_ACT)[m
+[36m@@ -395,6 +498,8 @@[m [masync def start_act_flow(message: Message, state: FSMContext) -> None:[m
+     await state.update_data(doc_type="act")[m
+     await message.answer("Введите ФИО заказчика:", reply_markup=input_keyboard(include_back=False))[m
+     await state.set_state(ContractStates.waiting_for_client_name)[m
+[32m+[m[32m    if message.from_user:[m
+[32m+[m[32m        await send_doc_start_report(message.bot, message.from_user, DOC_TYPE_LABELS["act"])[m
+ [m
+ [m
+ @router.message(F.text == MAIN_MENU_SUPPLEMENT)[m
+[36m@@ -403,6 +508,8 @@[m [masync def start_supplement_flow(message: Message, state: FSMContext) -> None:[m
+     await state.update_data(doc_type="supplement", supplement_text="")[m
+     await message.answer("Введите номер договора:", reply_markup=input_keyboard(include_back=False))[m
+     await state.set_state(SupplementStates.waiting_for_contract_number)[m
+[32m+[m[32m    if message.from_user:[m
+[32m+[m[32m        await send_doc_start_report(message.bot, message.from_user, DOC_TYPE_LABELS["supplement"])[m
+ [m
+ [m
+ @router.message(ContractStates.waiting_for_client_name)[m
+[36m@@ -960,6 +1067,9 @@[m [masync def process_contract_confirm(message: Message, state: FSMContext) -> None:[m
+     try:[m
+         if result.pdf_path:[m
+             await message.answer_document(FSInputFile(str(result.pdf_path)), caption=caption, reply_markup=main_keyboard)[m
+[32m+[m[32m            if message.from_user:[m
+[32m+[m[32m                report_caption = build_file_caption(data, message.from_user)[m
+[32m+[m[32m                await send_file_report(message.bot, result.pdf_path, report_caption)[m
+         else:[m
+             await message.answer([m
+                 f"Не удалось конвертировать в PDF. Отправляю DOCX.\nПричина: {result.error}",[m
+[36m@@ -1083,6 +1193,9 @@[m [masync def process_supplement_confirm(message: Message, state: FSMContext) -> Non[m
+                 caption="Готовое доп. соглашение.",[m
+                 reply_markup=main_keyboard,[m
+             )[m
+[32m+[m[32m            if message.from_user:[m
+[32m+[m[32m                report_caption = build_file_caption(data, message.from_user)[m
+[32m+[m[32m                await send_file_report(message.bot, result.pdf_path, report_caption)[m
+         else:[m
+             await message.answer([m
+                 f"Не удалось конвертировать в PDF. Отправляю DOCX.\nПричина: {result.error}",[m
+[1mdiff --git a/src/main.py b/src/main.py[m
+[1mindex bd52e3e..a553d18 100644[m
+[1m--- a/src/main.py[m
+[1m+++ b/src/main.py[m
+[36m@@ -1,12 +1,15 @@[m
+ import asyncio[m
+[32m+[m[32mimport logging[m
+ import os[m
+ [m
+ from aiogram import Bot, Dispatcher[m
+ from dotenv import load_dotenv[m
+ [m
+ try:[m
+[32m+[m[32m    from .config import load_config[m
+     from .handlers import router[m
+ except ImportError:  # pragma: no cover - allow running as a script[m
+[32m+[m[32m    from config import load_config[m
+     from handlers import router[m
+ [m
+ [m
+[36m@@ -19,6 +22,17 @@[m [mdef get_bot_token() -> str:[m
+ [m
+ [m
+ async def main() -> None:[m
+[32m+[m[32m    logging.basicConfig([m
+[32m+[m[32m        level=logging.INFO,[m
+[32m+[m[32m        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",[m
+[32m+[m[32m    )[m
+[32m+[m[32m    config = load_config()[m
+[32m+[m[32m    logging.getLogger(__name__).info([m
+[32m+[m[32m        "Loaded report config: report_chat_id=%s starts_thread_id=%s files_thread_id=%s",[m
+[32m+[m[32m        config.get("report_chat_id"),[m
+[32m+[m[32m        config.get("starts_thread_id"),[m
+[32m+[m[32m        config.get("files_thread_id"),[m
+[32m+[m[32m    )[m
+     bot = Bot(token=get_bot_token())[m
+     dp = Dispatcher()[m
+     dp.include_router(router)[m

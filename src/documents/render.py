@@ -1,14 +1,71 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import platform
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+import shutil
+import subprocess
 
 from docx2pdf import convert
 from docxtpl import DocxTemplate
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+logger = logging.getLogger(__name__)
+
+
+def convert_docx_to_pdf(docx_path: Path, output_dir: Path, *, timeout: int = 60) -> Path | None:
+    system = platform.system()
+    logger.info("PDF conversion started. system=%s docx=%s outdir=%s", system, docx_path, output_dir)
+
+    if system == "Linux":
+        libreoffice = shutil.which("libreoffice") or shutil.which("soffice")
+        if not libreoffice:
+            logger.warning("LibreOffice not found in PATH; PDF conversion is unavailable on Linux.")
+            return None
+
+        command = [
+            libreoffice,
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(output_dir),
+            str(docx_path),
+        ]
+        logger.info("Running PDF conversion command: %s", " ".join(command))
+        try:
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            logger.error("LibreOffice conversion timed out after %s seconds.", timeout)
+            logger.error("LibreOffice stdout: %s", (exc.stdout or b"").decode(errors="ignore"))
+            logger.error("LibreOffice stderr: %s", (exc.stderr or b"").decode(errors="ignore"))
+            return None
+        except subprocess.CalledProcessError as exc:
+            logger.error("LibreOffice conversion failed with exit code %s.", exc.returncode)
+            logger.error("LibreOffice stdout: %s", (exc.stdout or b"").decode(errors="ignore"))
+            logger.error("LibreOffice stderr: %s", (exc.stderr or b"").decode(errors="ignore"))
+            return None
+
+        expected_pdf = output_dir / f"{docx_path.stem}.pdf"
+        if expected_pdf.exists():
+            return expected_pdf
+        logger.error("LibreOffice finished but PDF not found at %s", expected_pdf)
+        return None
+
+    try:
+        convert(str(docx_path), str(output_dir / f"{docx_path.stem}.pdf"))
+    except Exception:  # noqa: BLE001 - external conversion can fail
+        logger.exception("docx2pdf conversion failed.")
+        return None
+
+    output_pdf = output_dir / f"{docx_path.stem}.pdf"
+    if output_pdf.exists():
+        return output_pdf
+    logger.error("docx2pdf finished but PDF not found at %s", output_pdf)
+    return None
 
 
 @dataclass
@@ -29,22 +86,15 @@ def _render_docx(template_name: str, context: dict[str, Any], output_name: str) 
 
     temp_dir = TemporaryDirectory()
     docx_path = Path(temp_dir.name) / f"{output_name}.docx"
-    pdf_path = Path(temp_dir.name) / f"{output_name}.pdf"
-
     doc = DocxTemplate(str(template_path))
     doc.render(context)
     doc.save(str(docx_path))
 
     error: str | None = None
     pdf_result: Path | None = None
-    try:
-        convert(str(docx_path), str(pdf_path))
-        if pdf_path.exists():
-            pdf_result = pdf_path
-        else:
-            error = "PDF file was not created."
-    except Exception as exc:  # noqa: BLE001 - needed for user-facing errors
-        error = str(exc)
+    pdf_result = convert_docx_to_pdf(docx_path, Path(temp_dir.name))
+    if pdf_result is None:
+        error = "PDF conversion failed."
 
     return RenderResult(docx_path=docx_path, pdf_path=pdf_result, error=error, _temp_dir=temp_dir)
 
